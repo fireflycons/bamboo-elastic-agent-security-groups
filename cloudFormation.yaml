@@ -1,6 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Lambda to assign additional security groups to elastic agents on launch
-
 Parameters:
   AdditionalSecurityGroups:
     Description: Additional security groups to assign to elastic instances
@@ -8,7 +7,7 @@ Parameters:
 
 Resources:
 
-  # Lambda to detect elastic instance launch and assign additional security group(s) when this happens
+  # Lambda to update instance security groups
   InstanceLaunchLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -123,7 +122,6 @@ Resources:
               group_str = ', '.join(map(str, group_ids))
               print(f'Modfiying bamboo instance {instance_id}, security groups - {group_str}')
               client.modify_instance_attribute(InstanceId=instance_id, Groups=group_ids)
-
       Description: Set additional SGs on Elastic Bamboo instances
       Handler: index.lambda_handler
       MemorySize: 128
@@ -132,7 +130,9 @@ Resources:
       Timeout: 15
       Environment:
         Variables:
-          ADDITIONAL_SECURITY_GROUPS: !Join [ ',', !Ref 'AdditionalSecurityGroups' ]
+          ADDITIONAL_SECURITY_GROUPS: !Join
+            - ','
+            - !Ref 'AdditionalSecurityGroups'
 
   # Execution role for lambda
   LambdaRole:
@@ -149,42 +149,40 @@ Resources:
             Action:
               - sts:AssumeRole
       ManagedPolicyArns:
-        -
-          arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        -
-          PolicyName: "UpdateInstanceSecurityGroups"
+        - PolicyName: UpdateInstanceSecurityGroups
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
-              -
-                Effect: "Allow"
-                Action: [
-                  "ec2:DescribeSecurityGroups",
-                  "ec2:DescribeInstances",
-                  "ec2:DescribeTags",
-                  "ec2:ModifyInstanceAttribute"
-                ]
-                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                  - ec2:ModifyInstanceAttribute
+                Resource: '*'
 
-  # Rule that triggers the lambda
+  # Rule that detects instance launch and triggers the lambda
   InstanceLaunchRule:
     Type: AWS::Events::Rule
     Properties:
       Description: Trigger a Lambda function anytime a new EC2 instance is created
-      EventPattern: {
-          "source": [ "aws.ec2" ],
-          "detail-type": [ "EC2 Instance State-change Notification" ],
-          "detail": {
-            "state": [ "pending" ]
-          }
-        }
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - pending
       Name: bamboo-elastic-instance-start
       State: ENABLED
       Targets:
         - Arn: !GetAtt 'InstanceLaunchLambda.Arn'
           Id: current
 
+  # Rights for CloudWatch Events to trigger the lambda
   LambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
