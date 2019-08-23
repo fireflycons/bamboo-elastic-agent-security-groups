@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda to assign additional security groups to elastic agents on launch
+
+Parameters:
+  AdditionalSecurityGroups:
+    Description: Additional security groups to assign to elastic instances
+    Type: List<AWS::EC2::SecurityGroup::Id>
+
+Resources:
+
+  # Lambda to detect elastic instance launch and assign additional security group(s) when this happens
+  InstanceLaunchLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+          import boto3
+          import json
+          import re
+          import os
+          import time
+          from botocore.exceptions import ClientError
+
+          # Entry point for the lambda
+          def lambda_handler(event, context):
+
+              # Get instance id from event details
+              instance_id = event['detail']['instance-id']
+
+              # Check it is an elastic agent
+              if not is_elastic_agent(instance_id):
+                  print(f'{instance_id} is not a bamboo elastic instance')
+                  return
+
+              # No groups to add yet
+              additional_groups = None
+
+              try:
+                  # Read group IDs from lambda environment
+                  additional_groups = os.environ['ADDITIONAL_SECURITY_GROUPS']
+              except KeyError:
+                  print('WARNING: No additional groups specified in lambda environment')
+                  return
+
+              # Add the requested security group(s) to the instance
+              assign_security_groups(instance_id, additional_groups.split(','))
+
+          # Determine if instance is an elastic agent.
+          # We do this by looking at the Name tag, which will be something like bam::WIN-PNDPM4LTCR6::WIN-PNDPM4LTCR6$
+          def is_elastic_agent(instance_id):
+
+              client = boto3.client('ec2')
+              tries = 0
+              tags_dict = None
+
+              # Might need to wait for the tags to appear...
+              while tries < 10:
+
+                  # Read tags
+                  response = client.describe_tags(Filters=[
+                          {
+                              'Name': 'resource-id',
+                              'Values': [ instance_id ]
+                          }
+                      ]
+                  )
+
+                  tags = response['Tags']
+
+                  if tags:
+                      # We got some tags - convert to dict of tag key = tag value
+                      tags_dict = dict((x['Key'], x['Value']) for x in tags)
+
+                      # Is 'Name' tag defined
+                      if 'Name' in tags_dict:
+                          # Yes - exit loop
+                          break
+
+                  # Now, wait a second and look again
+                  tries = tries + 1
+                  time.sleep(1)
+
+              if not tags_dict:
+                  # No tags at all after 10 seconds - unable to determine if this is a bamboo instance
+                  print(f'{instance-id} - Tags not present after 10 seconds')
+                  return False
+
+              if not ('Name' in tags_dict):
+                  # No 'Name' tag after 10 seconds - unable to determine if this is a bamboo instance
+                  print(f'{instance-id} - Name tag not present after 10 seconds')
+                  return False
+
+              # Check 'Name' tag matches format of a bamboo elastic instance and return boolean
+              return bool(re.compile('^bam::[A-Z0-9\-]+::[A-Z0-9\-]+').match(tags_dict['Name']))
+
+          # Update the instance security groups
+          def assign_security_groups(instance_id, additional_groups):
+
+              # Do nothing if no groups passed
+              if additional_groups is None or not additional_groups:
+                  return
+
+              # Get EC2 client
+              client = boto3.client('ec2')
+
+              # Get instance
+              instance = client.describe_instances(InstanceIds=[instance_id])
+
+              # Get existing groups
+              group_ids = list((x['GroupId']) for x in instance['Reservations'][0]['Instances'][0]['SecurityGroups'])
+
+              # Append new groups to the list
+              if (isinstance(additional_groups, str)):
+                  group_ids.append(additional_groups)
+              elif (isinstance(additional_groups, list)):
+                  group_ids.extend(additional_groups)
+
+              # Ensure list is unique
+              group_ids = list(set(group_ids))
+
+              # Update instance's group list
+              group_str = ', '.join(map(str, group_ids))
+              print(f'Modfiying bamboo instance {instance_id}, security groups - {group_str}')
+              client.modify_instance_attribute(InstanceId=instance_id, Groups=group_ids)
+
+      Description: Set additional SGs on Elastic Bamboo instances
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt 'LambdaRole.Arn'
+      Runtime: python3.6
+      Timeout: 15
+      Environment:
+        Variables:
+          ADDITIONAL_SECURITY_GROUPS: !Join [ ',', !Ref 'AdditionalSecurityGroups' ]
+
+  # Execution role for lambda
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        -
+          arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        -
+          PolicyName: "UpdateInstanceSecurityGroups"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: [
+                  "ec2:DescribeSecurityGroups",
+                  "ec2:DescribeInstances",
+                  "ec2:DescribeTags",
+                  "ec2:ModifyInstanceAttribute"
+                ]
+                Resource: "*"
+
+  # Rule that triggers the lambda
+  InstanceLaunchRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger a Lambda function anytime a new EC2 instance is created
+      EventPattern: {
+          "source": [ "aws.ec2" ],
+          "detail-type": [ "EC2 Instance State-change Notification" ],
+          "detail": {
+            "state": [ "pending" ]
+          }
+        }
+      Name: bamboo-elastic-instance-start
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'InstanceLaunchLambda.Arn'
+          Id: current
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt 'InstanceLaunchLambda.Arn'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'InstanceLaunchRule.Arn'
