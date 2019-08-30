@@ -10,3 +10,6 @@ What we have in this CloudFormation template is a CloudWatch event that triggers
 
 The lambda uses a regular expression to detect an elastic instance by EC2 tag `Name`. This regex is loosely based on observation that the value of the name tag is `bam::servername::servername` where servername is the name of the bamboo server and matches `[A-Z0-9\-]+`. This may or may not be strictly correct - corrections welcome!
 
+# See Also
+
+This repo provides the accepted solution to my own question on [Atlassian Commmunity Forums](https://community.atlassian.com/t5/Bamboo-questions/EC2-elastic-agent-security-groups/qaq-p/1148160)
